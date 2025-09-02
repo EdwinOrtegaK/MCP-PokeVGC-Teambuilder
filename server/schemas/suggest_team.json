@@ -2,16 +2,31 @@
   "title": "SuggestTeamParams",
   "type": "object",
   "properties": {
-    "format": { "type": "string" },
+    "format": { "type": "string", "default": "VGC2025" },
     "constraints": {
       "type": "object",
       "properties": {
+        "lock": { "type": "array", "items": { "type": "string" }, "description": "Miembros fijos por nombre" },
         "include_types": { "type": "array", "items": { "type": "string" } },
         "exclude_types": { "type": "array", "items": { "type": "string" } },
-        "min_speed": { "type": "integer" },
+        "require_abilities": { "type": "array", "items": { "type": "string" } },
+        "min_speed": { "type": "integer", "default": 0 },
+        "max_speed": { "type": "integer" },
+        "min_att": { "type": "integer" },
+        "min_spa": { "type": "integer" },
         "min_spdef": { "type": "integer" },
         "min_bulk": { "type": "integer" },
-        "roles_needed": { "type": "array", "items": { "type": "string" } }
+        "need_roles": { "type": "array", "items": { "type": "string" },
+          "description": "Ej: ['intimidate','fake_out','redirection','special_attacker','physical_attacker','fast']"
+        },
+        "strategy": {
+          "type": "object",
+          "properties": {
+            "trick_room": { "type": "boolean" },
+            "weather": { "type": "string", "enum": ["sun","rain","sand","snow"] },
+            "speed_control": { "type": "boolean" }
+          }
+        }
       },
       "additionalProperties": false
     }
