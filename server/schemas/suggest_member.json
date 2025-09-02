@@ -1,0 +1,19 @@
+{
+  "type": "object",
+  "properties": {
+    "min_speed": {
+      "type": "integer",
+      "description": "Velocidad mínima requerida para el Pokémon",
+      "default": 100
+    },
+    "required_ability": {
+      "type": "string",
+      "description": "Habilidad que el Pokémon debe tener"
+    },
+    "role": {
+      "type": "string",
+      "description": "Rol deseado (ej: physical_attacker, special_attacker, support, trick_room)",
+      "enum": ["physical_attacker", "special_attacker", "support", "trick_room", "fast", "bulky"]
+    }
+  }
+}
