@@ -1,0 +1,1 @@
+{"jsonrpc":"2.0","id":"2","method":"vgc.suggest_team","params":{"format":"VGC2025","constraints":{"min_speed":80,"min_bulk":300,"min_spdef":0,"include_types":[],"exclude_types":[],"roles_needed":[]}}}
