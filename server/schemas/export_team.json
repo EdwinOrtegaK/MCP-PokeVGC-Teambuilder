@@ -1,0 +1,27 @@
+{
+  "title": "ExportTeamParams",
+  "type": "object",
+  "properties": {
+    "team": {
+      "type": "object",
+      "properties": {
+        "members": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {"type":"string"},
+              "type1": {"type":"string"},
+              "type2": {"type":["string","null"]},
+              "role":  {"type":"string"}
+            },
+            "required":["name","type1","role"]
+          }
+        }
+      },
+      "required": ["members"]
+    }
+  },
+  "required": ["team"],
+  "additionalProperties": false
+}
