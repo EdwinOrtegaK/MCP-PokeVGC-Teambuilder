@@ -4,8 +4,14 @@ MCP Server para sugerencias de equipos VGC
 """
 import sys
 import json
-from typing import Any, Dict, List, Optional
 import logging
+
+from typing import Any, Dict, List, Optional
+from server.tools.dataset import load_pokemon
+from server.tools.filters import apply_filters, bulk_score
+from server.tools.synergy import compute_synergy
+from server.tools.roles import infer_roles
+
 
 # Configurar logging para debug
 logging.basicConfig(level=logging.DEBUG, stream=sys.stderr, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -19,10 +25,11 @@ except ImportError:
 
 # Modelos de datos
 class SuggestParams(BaseModel):
-    format: Optional[str] = "vgc2024"
+    format: Optional[str] = "vgc2022"
     playstyle: Optional[str] = "balanced"
     core_pokemon: Optional[List[str]] = None
     banned_pokemon: Optional[List[str]] = None
+    constraints: Optional[Dict[str, Any]] = None 
 
 class Pokemon(BaseModel):
     name: str
@@ -36,57 +43,110 @@ class Pokemon(BaseModel):
 
 class Team(BaseModel):
     pokemon: List[Pokemon]
-    format: Optional[str] = "vgc2024"
+    format: Optional[str] = "vgc2022"
     name: Optional[str] = None
 
 # Funciones de herramientas
 def suggest_team(params: SuggestParams) -> Dict[str, Any]:
-    """Sugiere un equipo basado en los parámetros dados"""
-    logger.debug(f"Generando equipo con parámetros: {params}")
-    
-    pokemon_pool = [
-        {"name": "Garchomp", "item": "Life Orb", "ability": "Rough Skin"},
-        {"name": "Rotom-Heat", "item": "Sitrus Berry", "ability": "Levitate"},
-        {"name": "Amoonguss", "item": "Rocky Helmet", "ability": "Regenerator"},
-        {"name": "Incineroar", "item": "Assault Vest", "ability": "Intimidate"},
-        {"name": "Rillaboom", "item": "Miracle Seed", "ability": "Grassy Surge"},
-        {"name": "Dragapult", "item": "Focus Sash", "ability": "Clear Body"},
-        {"name": "Urshifu", "item": "Focus Sash", "ability": "Unseen Fist"},
-        {"name": "Tornadus", "item": "Mental Herb", "ability": "Prankster"},
-        {"name": "Landorus-Therian", "item": "Choice Scarf", "ability": "Intimidate"},
-        {"name": "Calyrex-Shadow", "item": "Focus Sash", "ability": "As One"},
-    ]
-    
-    selected_pokemon = []
-    
-    # Agregar Pokémon core
-    if params.core_pokemon:
-        for core in params.core_pokemon:
-            core_pokemon = next((p for p in pokemon_pool if p["name"].lower() == core.lower()), None)
-            if core_pokemon:
-                selected_pokemon.append(core_pokemon)
-    
-    # Completar el equipo
-    banned_names = [p.lower() for p in (params.banned_pokemon or [])]
-    
-    for pokemon in pokemon_pool:
-        if len(selected_pokemon) >= 6:
-            break
-        if pokemon["name"].lower() not in banned_names and pokemon not in selected_pokemon:
-            selected_pokemon.append(pokemon)
-    
-    # Rellenar si no hay suficientes
-    while len(selected_pokemon) < 6:
-        selected_pokemon.append({"name": "Ditto", "item": "Choice Scarf", "ability": "Imposter"})
-    
+    csv_path = "data/pokemon.csv"
+    pokes = load_pokemon(csv_path)
+    pokes = [p for p in pokes if getattr(p, "generation", 0) <= 8]
+
+    c = params.constraints or {}
+    lock_names = [n.lower() for n in c.get("lock", [])]
+    include_types = set(t.lower() for t in c.get("include_types", []))
+    exclude_types = set(t.lower() for t in c.get("exclude_types", []))
+    require_abilities = [a.lower() for a in c.get("require_abilities", [])]
+    min_speed = int(c.get("min_speed", 0))
+    max_speed = c.get("max_speed")
+    min_att = c.get("min_att")
+    min_spa = c.get("min_spa")
+    min_spdef = int(c.get("min_spdef", 0)) if c.get("min_spdef") is not None else 0
+    min_bulk = int(c.get("min_bulk", 0)) if c.get("min_bulk") is not None else 0
+    need_roles = set(r.lower() for r in c.get("need_roles", []))
+    strategy = c.get("strategy", {}) or {}
+    tr_mode = bool(strategy.get("trick_room"))
+    weather = strategy.get("weather")
+    want_speed_control = bool(strategy.get("speed_control"))
+
+    # filtros ya existentes (tipos, speed, bulk, spdef)
+    class C:
+        include_types = list(include_types)
+        exclude_types = list(exclude_types)
+        min_speed = 0 if tr_mode else min_speed
+        min_spdef = min_spdef
+        min_bulk = min_bulk
+        roles_needed = []
+
+    pool = apply_filters(pokes, C())
+
+    # filtros por abilities, max_speed, umbrales att/spa
+    def pass_extra(p):
+        abis = (p.abilities or "").lower()
+        if require_abilities and not all(a in abis for a in require_abilities):
+            return False
+        if max_speed is not None and p.spe > int(max_speed):
+            return False
+        if min_att is not None and p.att < int(min_att): return False
+        if min_spa is not None and p.spa < int(min_spa): return False
+        return True
+
+    pool = [p for p in pool if pass_extra(p)]
+
+    # lock
+    name_index = {p.name.lower(): p for p in pokes}
+    locked = []
+    for n in lock_names:
+        if n in name_index:
+            locked.append(name_index[n])
+
+    # score segun estrategia
+    def score(p):
+        atk = max(p.att, p.spa)
+        base = p.spe + atk + (bulk_score(p) // 2)
+        # ajustes por estrategia
+        r = infer_roles(p)
+        if tr_mode:
+            base = (800 - p.spe) + (bulk_score(p)) + (p.att + p.spa)//2
+        if weather == "sun" and ("sun_abuser" in r): base += 120
+        if weather == "rain" and ("rain_abuser" in r): base += 120
+        if weather == "sand" and ("sand_abuser" in r): base += 120
+        if weather == "snow" and ("snow_abuser" in r): base += 120
+        if want_speed_control and ("speed_control" in r): base += 80
+        # roles especificos, sube a los que aportan
+        for need in need_roles:
+            if need in r:
+                base += 70
+            # atacantes por tipo de daño
+            if need == "special_attacker" and p.spa >= p.att and p.spa >= 100: base += 50
+            if need == "physical_attacker" and p.att > p.spa and p.att >= 100: base += 50
+            if need == "fast" and p.spe >= 100 and not tr_mode: base += 50
+        return base
+
+    # evita duplicados funcionales y arma el equipo
+    banned_names = set()
+    pick = list(locked)
+
+    # elimina bloqueados del pool
+    locked_names = {x.name for x in locked}
+    cand = [p for p in pool if p.name not in locked_names]
+
+    cand_sorted = sorted(cand, key=score, reverse=True)
+
+    for p in cand_sorted:
+        if len(pick) >= 6: break
+        if p.name in banned_names: continue
+        pick.append(p)
+        banned_names.add(p.name)
+
+    team_members = [{"name": p.name} for p in pick[:6]]
+    syn = compute_synergy(pick[:6])
+
     return {
-        "team": {
-            "pokemon": selected_pokemon[:6],
-            "format": params.format,
-            "name": f"Suggested {params.playstyle.title()} Team"
-        },
+        "team": {"pokemon": team_members, "format": params.format, "name": "Suggested Team"},
+        "synergy": syn.model_dump() if hasattr(syn, "model_dump") else syn,
         "success": True,
-        "message": f"Generated {params.playstyle} team for {params.format}"
+        "message": "Team generated with constraints"
     }
 
 def team_to_showdown(team: Team) -> str:
@@ -167,7 +227,7 @@ def handle_request(request: Dict[str, Any]) -> Optional[Dict[str, Any]]:
                 "jsonrpc": "2.0",
                 "id": request_id,
                 "result": {
-                    "protocolVersion": "2024-11-05",
+                    "protocolVersion": client_protocol,
                     "capabilities": {
                         "tools": {}
                     },
@@ -206,8 +266,9 @@ def handle_request(request: Dict[str, Any]) -> Optional[Dict[str, Any]]:
                         "properties": {
                             "format": {
                                 "type": "string",
-                                "description": "Formato de VGC (ej: vgc2024, vgc2025)",
-                                "default": "vgc2024"
+                                "description": "Formato de VGC",
+                                "enum": ["vgc2020", "vgc2021", "vgc2022"],
+                                "default": "vgc2022"
                             },
                             "playstyle": {
                                 "type": "string",
@@ -224,6 +285,35 @@ def handle_request(request: Dict[str, Any]) -> Optional[Dict[str, Any]]:
                                 "type": "array", 
                                 "items": {"type": "string"},
                                 "description": "Pokémon que no deben estar en el equipo"
+                            },
+                            "constraints": {
+                              "type": "object",
+                              "properties": {
+                                "lock": { "type":"array", "items":{"type":"string"} },
+                                "include_types": { "type":"array", "items":{"type":"string"} },
+                                "exclude_types": { "type":"array", "items":{"type":"string"} },
+                                "require_abilities": { "type":"array", "items":{"type":"string"} },
+                                "min_speed": { "type":"integer", "default": 0 },
+                                "max_speed": { "type":"integer" },
+                                "min_att": { "type":"integer" },
+                                "min_spa": { "type":"integer" },
+                                "min_spdef": { "type":"integer" },
+                                "min_bulk": { "type":"integer" },
+                                "need_roles": {
+                                  "type":"array",
+                                  "items":{"type":"string"},
+                                  "description":"p. ej. ['intimidate','fake_out','redirection','special_attacker','physical_attacker','fast']"
+                                },
+                                "strategy": {
+                                  "type":"object",
+                                  "properties":{
+                                    "trick_room":{"type":"boolean"},
+                                    "weather":{"type":"string","enum":["sun","rain","sand","snow"]},
+                                    "speed_control":{"type":"boolean"}
+                                  }
+                                }
+                              },
+                              "additionalProperties": false
                             }
                         }
                     }
@@ -261,6 +351,77 @@ def handle_request(request: Dict[str, Any]) -> Optional[Dict[str, Any]]:
                         },
                         "required": ["team"]
                     }
+                },
+                {
+                    "name": "pool.filter",
+                    "description": "Lista candidatos del pool según filtros sobre el CSV (tipos, velocidad, abilities, etc.)",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "constraints": {
+                                "type": "object",
+                                "properties": {
+                                    "include_types": {"type": "array", "items": {"type": "string"}},
+                                    "exclude_types": {"type": "array", "items": {"type": "string"}},
+                                    "min_speed": {"type": "integer", "default": 0},
+                                    "max_speed": {"type": "integer"},
+                                    "min_att": {"type": "integer"},
+                                    "min_spa": {"type": "integer"},
+                                    "require_abilities": {"type": "array", "items": {"type": "string"}}
+                                },
+                                "additionalProperties": false
+                            },
+                            "limit": {"type": "integer", "default": 30}
+                        },
+                        "required": ["constraints"]
+                    }
+                },
+                {
+                    "name": "team.synergy",
+                    "description": "Analiza cobertura y resistencias de un equipo (usando el CSV)",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "team": {
+                                "type": "object",
+                                "properties": {
+                                    "pokemon": {
+                                        "type": "array",
+                                        "items": {
+                                            "type": "object",
+                                            "properties": {"name": {"type": "string"}},
+                                            "required": ["name"]
+                                        }
+                                    }
+                                },
+                                "required": ["pokemon"]
+                            }
+                        },
+                        "required": ["team"]
+                    }
+                },
+                {
+                    "name": "suggest_member",
+                    "description": "Sugiere 3–5 candidatos que cumplan criterios específicos",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "min_speed": {
+                                "type": "integer",
+                                "description": "Velocidad mínima requerida",
+                                "default": 100
+                            },
+                            "required_ability": {
+                                "type": "string",
+                                "description": "Habilidad requerida (substring match)"
+                            },
+                            "role": {
+                                "type": "string",
+                                "description": "Rol deseado",
+                                "enum": ["physical_attacker","special_attacker","support","trick_room","fast","bulky"]
+                            }
+                        }
+                    }
                 }
             ]
             
@@ -292,17 +453,28 @@ def handle_request(request: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             if tool_name == "suggest_team":
                 try:
                     suggest_params = SuggestParams(**arguments)
+
+                    allowed = {"vgc2020", "vgc2021", "vgc2022"}
+                    if suggest_params.format not in allowed:
+                        return {
+                            "jsonrpc": "2.0",
+                            "id": request_id,
+                            "error": {
+                                "code": -32602,
+                                "message": "Invalid params",
+                                "data": "Dataset soporta Gen 1–8. Usa uno de: vgc2020, vgc2021, vgc2022."
+                            }
+                        }
+
                     result = suggest_team(suggest_params)
                     return {
                         "jsonrpc": "2.0",
                         "id": request_id,
                         "result": {
-                            "content": [
-                                {
-                                    "type": "text",
-                                    "text": json.dumps(result, indent=2, ensure_ascii=False)
-                                }
-                            ]
+                            "content": [{
+                                "type": "text",
+                                "text": json.dumps(result, indent=2, ensure_ascii=False)
+                            }]
                         }
                     }
                 except Exception as e:
@@ -345,6 +517,132 @@ def handle_request(request: Dict[str, Any]) -> Optional[Dict[str, Any]]:
                         }
                     }
             
+            elif tool_name == "pool.filter":
+                # Filtros rápidos sobre el CSV con pandas (sin tocar tu motor)
+                import pandas as pd
+                constraints = arguments.get("constraints", {}) or {}
+                limit = int(arguments.get("limit", 30))
+
+                df = pd.read_csv("data/pokemon.csv")
+                if "Generation" in df.columns:
+                    df = df[df["Generation"] <= 8]
+
+                # Normaliza
+                def norm(x): return str(x).lower() if pd.notna(x) else ""
+                df["Type 1"] = df["Type 1"].astype(str)
+                df["Type 2"] = df["Type 2"].astype(str)
+                df["Abilities"] = df["Abilities"].astype(str)
+
+                inc = [t.lower() for t in constraints.get("include_types", [])]
+                exc = [t.lower() for t in constraints.get("exclude_types", [])]
+                min_speed = int(constraints.get("min_speed", 0))
+                max_speed = constraints.get("max_speed")
+                min_att = constraints.get("min_att")
+                min_spa = constraints.get("min_spa")
+                req_abis = [a.lower() for a in constraints.get("require_abilities", [])]
+
+                mask = (df["Spe"] >= min_speed)
+                if max_speed is not None:
+                    mask &= (df["Spe"] <= int(max_speed))
+                if min_att is not None:
+                    mask &= (df["Att"] >= int(min_att))
+                if min_spa is not None:
+                    mask &= (df["Spa"] >= int(min_spa))
+                if inc:
+                    mask &= df.apply(lambda r: any(t in [str(r["Type 1"]).lower(), str(r["Type 2"]).lower()] for t in inc), axis=1)
+                if exc:
+                    mask &= df.apply(lambda r: all(t not in [str(r["Type 1"]).lower(), str(r["Type 2"]).lower()] for t in exc), axis=1)
+                if req_abis:
+                    mask &= df["Abilities"].str.lower().apply(lambda s: all(a in s for a in req_abis))
+
+                out = df.loc[mask, ["Name","Type 1","Type 2","HP","Att","Def","Spa","Spd","Spe"]].copy()
+                # bulk simple como métrica auxiliar
+                out["Bulk"] = out["HP"] + out["Def"] + out["Spd"]
+
+                # Top-N (prioriza Spe + atacante mayor)
+                out["_score"] = out["Spe"] + out[["Att","Spa"]].max(axis=1) + (out["Bulk"]/2)
+                out = out.sort_values("_score", ascending=False).head(limit)
+                out = out.drop(columns=["_score"])
+
+                result_rows = out.to_dict(orient="records")
+                return {
+                    "jsonrpc":"2.0","id":request_id,
+                    "result":{"content":[{"type":"text","text":json.dumps(result_rows, ensure_ascii=False, indent=2)}]}
+                }
+
+            elif tool_name == "team.synergy":
+                # Usa tu motor real para calcular sinergia
+                try:
+                    from server.tools.dataset import load_pokemon
+                    from server.tools.synergy import compute_synergy
+
+                    names = [x["name"] for x in arguments["team"]["pokemon"]]
+                    pool = load_pokemon("data/pokemon.csv")
+                    pool = [p for p in pool if getattr(p, "generation", 0) <= 8]
+                    by_name = {p.name.lower(): p for p in pool}
+                    selected = [by_name[n.lower()] for n in names if n and n.lower() in by_name]
+                    syn = compute_synergy(selected)
+                    syn_dict = syn.model_dump() if hasattr(syn, "model_dump") else syn
+                    return {
+                        "jsonrpc":"2.0","id":request_id,
+                        "result":{"content":[{"type":"text","text":json.dumps(syn_dict, ensure_ascii=False, indent=2)}]}
+                    }
+                except Exception as e:
+                    logger.exception(f"team.synergy failed: {e}")
+                    return {
+                        "jsonrpc":"2.0","id":request_id,
+                        "error":{"code":-32603,"message":"Internal error","data":str(e)}
+                    }
+
+            elif tool_name == "suggest_member":
+                # Sugerencias rápidas (3–5) para construir por pasos
+                import pandas as pd
+                min_speed = int(arguments.get("min_speed", 0))
+                required_ability = arguments.get("required_ability")
+                role = arguments.get("role")
+
+                df = pd.read_csv("data/pokemon.csv")
+                if "Generation" in df.columns:
+                    df = df[df["Generation"] <= 8]
+
+                df["Abilities"] = df["Abilities"].astype(str)
+
+                mask = (df["Spe"] >= min_speed)
+                if required_ability:
+                    mask &= df["Abilities"].str.contains(required_ability, case=False, na=False)
+
+                if role == "special_attacker":
+                    mask &= (df["Spa"] >= 100)
+                elif role == "physical_attacker":
+                    mask &= (df["Att"] >= 100)
+                elif role == "fast":
+                    mask &= (df["Spe"] >= max(100, min_speed))
+                elif role == "bulky":
+                    mask &= (df["HP"] + df["Def"] + df["Spd"] >= 360)
+                elif role == "support":
+                    mask &= df["Abilities"].str.contains("Intimidate|Prankster|Regenerator|Friend Guard", case=False, na=False)
+                elif role == "trick_room":
+                    # rápido y sucio: preferir Spe <= 60 y buen bulk
+                    mask &= (df["Spe"] <= 60) & ((df["HP"] + df["Def"] + df["Spd"]) >= 360)
+
+                cand = df.loc[mask, ["Name","Type 1","Type 2","HP","Att","Def","Spa","Spd","Spe","Abilities"]].copy()
+                if cand.empty:
+                    sample = []
+                else:
+                    # puntuación simple para ordenar (puedes tunearla)
+                    cand["Bulk"] = cand["HP"] + cand["Def"] + cand["Spd"]
+                    cand["_score"] = cand["Spe"] + cand[["Att","Spa"]].max(axis=1) + (cand["Bulk"]/2)
+                    # Para TR, invierte la velocidad
+                    if role == "trick_room":
+                        cand["_score"] = (800 - cand["Spe"]) + cand["Bulk"] + cand[["Att","Spa"]].max(axis=1)/2
+                    cand = cand.sort_values("_score", ascending=False).head(5)
+                    sample = cand.drop(columns=["_score"]).to_dict(orient="records")
+
+                return {
+                    "jsonrpc":"2.0","id":request_id,
+                    "result":{"content":[{"type":"text","text":json.dumps(sample, ensure_ascii=False, indent=2)}]}
+                }
+
             else:
                 return {
                     "jsonrpc": "2.0",
@@ -415,42 +713,19 @@ def main():
                 response = handle_request(request)
                 
                 # Solo enviar respuesta si no es None
-                if response is not None:
+                if isinstance(response, dict) and response.get("id") is not None:
                     response_json = json.dumps(response, ensure_ascii=False)
                     logger.debug(f"Enviando respuesta: {response_json}")
-                    
                     print(response_json)
                     sys.stdout.flush()
                 else:
-                    logger.debug("Sin respuesta necesaria (notification)")
+                    logger.debug("Sin respuesta necesaria (notification o sin id)")
                 
             except json.JSONDecodeError as e:
                 logger.error(f"Error decodificando JSON: {e} - Línea: {line}")
-                error_response = {
-                    "jsonrpc": "2.0",
-                    "id": None,
-                    "error": {
-                        "code": -32700,
-                        "message": "Parse error",
-                        "data": str(e)
-                    }
-                }
-                print(json.dumps(error_response))
-                sys.stdout.flush()
                 
             except Exception as e:
                 logger.exception(f"Error inesperado procesando línea: {e}")
-                error_response = {
-                    "jsonrpc": "2.0",
-                    "id": None,
-                    "error": {
-                        "code": -32603,
-                        "message": "Internal error",
-                        "data": str(e)
-                    }
-                }
-                print(json.dumps(error_response))
-                sys.stdout.flush()
     
     except KeyboardInterrupt:
         logger.info("Servidor detenido por el usuario")
