@@ -1,42 +1,58 @@
 from typing import List, Dict
 from ..core.models import Pokemon, SynergyReport, TypeName
 
-# Cobertura ofensiva mínima (se ampliara luego)
-# damage multiplier for OFFENSIVE type against DEFENSIVE type
-OFFENSIVE: Dict[TypeName, Dict[TypeName, float]] = {
-    "Fire":   {"Grass":2,"Ice":2,"Bug":2,"Steel":2,"Fire":0.5,"Water":0.5,"Rock":0.5,"Dragon":0.5},
-    "Water":  {"Fire":2,"Ground":2,"Rock":2,"Water":0.5,"Grass":0.5,"Dragon":0.5},
-    "Electric":{"Water":2,"Flying":2,"Electric":0.5,"Grass":0.5,"Dragon":0.5,"Ground":0},
-    "Grass":  {"Water":2,"Ground":2,"Rock":2,"Fire":0.5,"Grass":0.5,"Poison":0.5,"Flying":0.5,"Bug":0.5,"Dragon":0.5,"Steel":0.5},
-    "Ice":    {"Grass":2,"Ground":2,"Flying":2,"Dragon":2,"Fire":0.5,"Water":0.5,"Ice":0.5,"Steel":0.5},
-    "Fighting":{"Normal":2,"Ice":2,"Rock":2,"Dark":2,"Steel":2,"Poison":0.5,"Flying":0.5,"Psychic":0.5,"Bug":0.5,"Fairy":0.5,"Ghost":0},
-    "Ground": {"Fire":2,"Electric":2,"Poison":2,"Rock":2,"Steel":2,"Grass":0.5,"Bug":0.5,"Flying":0},
-    "Flying": {"Grass":2,"Fighting":2,"Bug":2,"Electric":0.5,"Rock":0.5,"Steel":0.5},
-    "Psychic":{"Fighting":2,"Poison":2,"Psychic":0.5,"Steel":0.5,"Dark":0},
-    "Rock":   {"Fire":2,"Ice":2,"Flying":2,"Bug":2,"Fighting":0.5,"Ground":0.5,"Steel":0.5},
-    "Ghost":  {"Psychic":2,"Ghost":2,"Dark":0.5,"Normal":0},
-    "Dragon": {"Dragon":2,"Steel":0.5,"Fairy":0},
-    "Dark":   {"Psychic":2,"Ghost":2,"Fighting":0.5,"Dark":0.5,"Fairy":0.5},
-    "Steel":  {"Ice":2,"Rock":2,"Fairy":2,"Fire":0.5,"Water":0.5,"Electric":0.5,"Steel":0.5},
-    "Fairy":  {"Fighting":2,"Dragon":2,"Dark":2,"Fire":0.5,"Poison":0.5,"Steel":0.5},
-    "Poison": {"Grass":2,"Fairy":2,"Poison":0.5,"Ground":0.5,"Rock":0.5,"Ghost":0.5,"Steel":0},
-    "Normal": {"Rock":0.5,"Steel":0.5,"Ghost":0},
-    "Bug":    {"Grass":2,"Psychic":2,"Dark":2,"Fighting":0.5,"Flying":0.5,"Poison":0.5,"Ghost":0.5,"Steel":0.5,"Fire":0.5,"Fairy":0.5},
+# Tabla de tipos
+TYPES: List[TypeName] = [
+    "Normal","Fire","Water","Electric","Grass","Ice","Fighting","Poison","Ground",
+    "Flying","Psychic","Bug","Rock","Ghost","Dragon","Dark","Steel","Fairy"
+]
+
+_EFFECT = {
+    "Normal":   {"x2": [], "x05": ["Rock","Steel"], "x0": ["Ghost"]},
+    "Fire":     {"x2": ["Grass","Ice","Bug","Steel"], "x05": ["Fire","Water","Rock","Dragon"], "x0": []},
+    "Water":    {"x2": ["Fire","Ground","Rock"], "x05": ["Water","Grass","Dragon"], "x0": []},
+    "Electric": {"x2": ["Water","Flying"], "x05": ["Electric","Grass","Dragon"], "x0": ["Ground"]},
+    "Grass":    {"x2": ["Water","Ground","Rock"], "x05": ["Fire","Grass","Poison","Flying","Bug","Dragon","Steel"], "x0": []},
+    "Ice":      {"x2": ["Grass","Ground","Flying","Dragon"], "x05": ["Fire","Water","Ice","Steel"], "x0": []},
+    "Fighting": {"x2": ["Normal","Ice","Rock","Dark","Steel"], "x05": ["Poison","Flying","Psychic","Bug","Fairy"], "x0": ["Ghost"]},
+    "Poison":   {"x2": ["Grass","Fairy"], "x05": ["Poison","Ground","Rock","Ghost"], "x0": ["Steel"]},
+    "Ground":   {"x2": ["Fire","Electric","Poison","Rock","Steel"], "x05": ["Grass","Bug"], "x0": ["Flying"]},
+    "Flying":   {"x2": ["Grass","Fighting","Bug"], "x05": ["Electric","Rock","Steel"], "x0": []},
+    "Psychic":  {"x2": ["Fighting","Poison"], "x05": ["Psychic","Steel"], "x0": ["Dark"]},
+    "Bug":      {"x2": ["Grass","Psychic","Dark"], "x05": ["Fire","Fighting","Poison","Flying","Ghost","Steel","Fairy","Rock"], "x0": []},
+    "Rock":     {"x2": ["Fire","Ice","Flying","Bug"], "x05": ["Fighting","Ground","Steel"], "x0": []},
+    "Ghost":    {"x2": ["Psychic","Ghost"], "x05": ["Dark"], "x0": ["Normal"]},
+    "Dragon":   {"x2": ["Dragon"], "x05": ["Steel"], "x0": ["Fairy"]},
+    "Dark":     {"x2": ["Psychic","Ghost"], "x05": ["Fighting","Dark","Fairy"], "x0": []},
+    "Steel":    {"x2": ["Ice","Rock","Fairy"], "x05": ["Fire","Water","Electric","Steel"], "x0": []},
+    "Fairy":    {"x2": ["Fighting","Dragon","Dark"], "x05": ["Fire","Poison","Steel"], "x0": []},
 }
 
-ALL_TYPES: List[TypeName] = list(OFFENSIVE.keys())
+OFFENSIVE: Dict[TypeName, Dict[TypeName, float]] = {atk: {d: 1.0 for d in TYPES} for atk in TYPES}
+for atk, eff in _EFFECT.items():
+    for d in eff["x2"]:
+        OFFENSIVE[atk][d] = 2.0
+    for d in eff["x05"]:
+        OFFENSIVE[atk][d] = 0.5
+    for d in eff["x0"]:
+        OFFENSIVE[atk][d] = 0.0
+
+ALL_TYPES: List[TypeName] = TYPES[:]
 
 def offensive_coverage_count(team: List[Pokemon]) -> Dict[TypeName, int]:
     """
-    Para cada tipo DEFENSIVO, cuenta cuántos miembros del equipo
-    pueden golpearlo a 2x (por STAB del miembro).
+    Para cada tipo DEFENSIVO, cuenta cuántos miembros del equipo pueden golpearlo a 2x
+    usando STAB (type1/type2) del Pokémon.
     """
     coverage: Dict[TypeName, int] = {t: 0 for t in ALL_TYPES}
     for p in team:
-        stabs = [p.type1] + ([p.type2] if p.type2 else [])
-        # si no conocemos el tipo en nuestra tabla parcial, lo ignoramos por ahora
+        stabs = []
+        if getattr(p, "type1", None):
+            stabs.append(p.type1)
+        if getattr(p, "type2", None):
+            stabs.append(p.type2)
+
         for def_t in ALL_TYPES:
-            # si CUALQUIER STAB del Pokémon pega 2x al tipo defensivo → cuenta
             ok = False
             for stab in stabs:
                 if stab in OFFENSIVE and def_t in OFFENSIVE[stab]:
@@ -49,27 +65,28 @@ def offensive_coverage_count(team: List[Pokemon]) -> Dict[TypeName, int]:
 
 def defensive_resistances(team: List[Pokemon]) -> Dict[TypeName, int]:
     """
-    Usa los multiplicadores 'against' de cada Pokémon (tus columnas Against X).
-    Cuenta cuántos miembros reciben <= 0.5x de cada tipo atacante.
+    Usa los multiplicadores 'against' de cada Pokémon (mapa p.against {Tipo: mult}).
+    Cuenta cuántos miembros reciben <= 0.5x de cada tipo atacante (incluye inmunidades 0x).
     """
     resist: Dict[TypeName, int] = {t: 0 for t in ALL_TYPES}
     for p in team:
+        against = getattr(p, "against", {}) or {}
         for atk_t in ALL_TYPES:
-            mult = p.against.get(atk_t, 1.0)
+            mult = against.get(atk_t, 1.0)
             if mult <= 0.5:
                 resist[atk_t] += 1
     return resist
 
 def find_holes(team: List[Pokemon]) -> List[str]:
     """
-    Identifica tipos atacantes problemáticos: promedio del multiplicador > 1.5x
-    (umbral inicial ajustable).
+    Tipos atacantes problemáticos: promedio del multiplicador > 1.5x (umbral inicial).
     """
     holes: List[str] = []
     for atk_t in ALL_TYPES:
         vals = []
         for p in team:
-            vals.append(p.against.get(atk_t, 1.0))
+            mult = (getattr(p, "against", {}) or {}).get(atk_t, 1.0)
+            vals.append(mult)
         if not vals:
             continue
         avg = sum(vals) / len(vals)
@@ -81,4 +98,8 @@ def compute_synergy(team: List[Pokemon]) -> SynergyReport:
     cov = offensive_coverage_count(team)
     res = defensive_resistances(team)
     holes = find_holes(team)
-    return SynergyReport(coverage_offensive=cov, resistances_defensive=res, holes=holes)
+    return SynergyReport(
+        coverage_offensive=cov,
+        resistances_defensive=res,
+        holes=holes
+    )
