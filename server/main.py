@@ -7,6 +7,7 @@ import json
 import logging
 
 from typing import Any, Dict, List, Optional
+from types import SimpleNamespace
 from server.tools.dataset import load_pokemon
 from server.tools.filters import apply_filters, bulk_score
 from server.tools.synergy import compute_synergy
@@ -70,25 +71,42 @@ def suggest_team(params: SuggestParams) -> Dict[str, Any]:
     want_speed_control = bool(strategy.get("speed_control"))
 
     # filtros ya existentes (tipos, speed, bulk, spdef)
-    class C:
-        include_types = list(include_types)
-        exclude_types = list(exclude_types)
-        min_speed = 0 if tr_mode else min_speed
-        min_spdef = min_spdef
-        min_bulk = min_bulk
-        roles_needed = []
+    C = SimpleNamespace(
+        include_types=list(include_types),
+        exclude_types=list(exclude_types),
+        min_speed=0 if tr_mode else min_speed,
+        min_spdef=min_spdef,
+        min_bulk=min_bulk,
+        roles_needed=[]
+    )
 
-    pool = apply_filters(pokes, C())
+    pool = apply_filters(pokes, C)
+
+    def _abilities_text(p) -> str:
+        """Normaliza abilities a un string lowercase sin comillas, robusto a list/str/None."""
+        ab = getattr(p, "abilities", None)
+        if ab is None:
+            return ""
+        if isinstance(ab, list):
+            txt = ",".join(map(str, ab))
+        else:
+            txt = str(ab)
+        return txt.replace("'", "").replace('"', "").lower()
 
     # filtros por abilities, max_speed, umbrales att/spa
     def pass_extra(p):
-        abis = (p.abilities or "").lower()
-        if require_abilities and not all(a in abis for a in require_abilities):
+        abis = _abilities_text(p)
+        if require_abilities and not all(a.lower() in abis for a in require_abilities):
             return False
-        if max_speed is not None and p.spe > int(max_speed):
+        spe = int(getattr(p, "spe", 0) or 0)
+        att = int(getattr(p, "att", 0) or 0)
+        spa = int(getattr(p, "spa", 0) or 0)
+        if max_speed is not None and spe > int(max_speed):
             return False
-        if min_att is not None and p.att < int(min_att): return False
-        if min_spa is not None and p.spa < int(min_spa): return False
+        if min_att is not None and att < int(min_att):
+            return False
+        if min_spa is not None and spa < int(min_spa):
+            return False
         return True
 
     pool = [p for p in pool if pass_extra(p)]
