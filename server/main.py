@@ -13,9 +13,39 @@ from server.tools.filters import apply_filters, bulk_score
 from server.tools.synergy import compute_synergy
 from server.tools.roles import infer_roles
 
+def _read_message(stdin_buf) -> dict | None:
+    # Leer cabeceras como bytes
+    headers = {}
+    while True:
+        line = stdin_buf.readline()
+        if not line:
+            return None  # EOF
+        line = line.rstrip(b"\r\n")
+        if line == b"":
+            break
+        k, v = line.split(b":", 1)
+        headers[k.strip().lower()] = v.strip()
+
+    length = int(headers.get(b"content-length", b"0"))
+    if length <= 0:
+        return None
+
+    body = stdin_buf.read(length)
+    return json.loads(body.decode("utf-8"))
+
+def _write_message(stdout_buf, payload: dict) -> None:
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    header = f"Content-Length: {len(body)}\r\n\r\n".encode("ascii")
+    stdout_buf.write(header)
+    stdout_buf.write(body)
+    stdout_buf.flush()
 
 # Configurar logging para debug
-logging.basicConfig(level=logging.DEBUG, stream=sys.stderr, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(
+    level=logging.WARNING,
+    stream=sys.stderr,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
 try:
@@ -713,43 +743,81 @@ def handle_request(request: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         }
 
 def main():
-    """Función principal del servidor"""
     logger.info("Iniciando servidor MCP VGC Team Builder...")
-    
-    try:
-        for line in sys.stdin:
-            line = line.strip()
-            if not line:
+    stdin_buf = sys.stdin.buffer
+    stdout_buf = sys.stdout.buffer
+
+    while True:
+        req = _read_message(stdin_buf)
+        if req is None:
+            break
+
+        req_id = req.get("id")
+        method = req.get("method")
+        try:
+            if method == "initialize":
+                protocol = req.get("params", {}).get("protocolVersion", "2024-11-05")
+                resp = {
+                    "jsonrpc": "2.0",
+                    "id": req_id,
+                    "result": {
+                        "protocolVersion": protocol,
+                        "capabilities": {"tools": {}},
+                        "serverInfo": {"name": "vgc-teambuilder", "version": "0.1.0"}
+                    }
+                }
+                _write_message(stdout_buf, resp)
+
+            elif method == "initialized":
+                # notification, no response
                 continue
-            
-            logger.debug(f"Línea recibida: {line}")
-            
-            try:
-                request = json.loads(line)
-                logger.debug(f"Request parseado: {request}")
-                
-                response = handle_request(request)
-                
-                # Solo enviar respuesta si no es None
-                if isinstance(response, dict) and response.get("id") is not None:
-                    response_json = json.dumps(response, ensure_ascii=False)
-                    logger.debug(f"Enviando respuesta: {response_json}")
-                    print(response_json)
-                    sys.stdout.flush()
+
+            elif method == "tools/list":
+                tools = [  # pega aquí tus definiciones COMPLETAS (suggest_team, export_showdown, pool.filter, team.synergy, suggest_member)
+                    # ... (las que ya tienes arriba)
+                ]
+                _write_message(stdout_buf, {"jsonrpc":"2.0","id": req_id, "result":{"tools": tools}})
+
+            elif method == "tools/call":
+                name = req.get("params", {}).get("name")
+                args = req.get("params", {}).get("arguments", {}) or {}
+
+                if name == "suggest_team":
+                    result = suggest_team(SuggestParams(**args))
+                    _write_message(stdout_buf, {"jsonrpc":"2.0","id":req_id,"result":{"content":[{"type":"text","text": json.dumps(result, ensure_ascii=False, indent=2)}]}})
+
+                elif name == "export_showdown":
+                    team = Team(**args["team"])
+                    txt = team_to_showdown(team)
+                    _write_message(stdout_buf, {"jsonrpc":"2.0","id":req_id,"result":{"content":[{"type":"text","text": txt}]}})
+
+                elif name == "pool.filter":
+                    # (tu implementación actual)
+                    # al final: _write_message(stdout_buf, {...})
+                    pass
+
+                elif name == "team.synergy":
+                    # (tu implementación actual)
+                    # al final: _write_message(stdout_buf, {...})
+                    pass
+
+                elif name == "suggest_member":
+                    # (tu implementación actual)
+                    # al final: _write_message(stdout_buf, {...})
+                    pass
+
                 else:
-                    logger.debug("Sin respuesta necesaria (notification o sin id)")
-                
-            except json.JSONDecodeError as e:
-                logger.error(f"Error decodificando JSON: {e} - Línea: {line}")
-                
-            except Exception as e:
-                logger.exception(f"Error inesperado procesando línea: {e}")
-    
-    except KeyboardInterrupt:
-        logger.info("Servidor detenido por el usuario")
-    except Exception as e:
-        logger.exception(f"Error fatal: {e}")
-        sys.exit(1)
+                    _write_message(stdout_buf, {"jsonrpc":"2.0","id":req_id,"error":{"code":-32601,"message":"Method not found","data":f"Unknown tool: {name}"}})
+
+            else:
+                if req_id is not None:
+                    _write_message(stdout_buf, {"jsonrpc":"2.0","id":req_id,"error":{"code":-32601,"message":"Method not found","data":f"Unknown method: {method}"}})
+
+        except Exception as e:
+            if req_id is not None:
+                _write_message(stdout_buf, {"jsonrpc":"2.0","id":req_id,"error":{"code":-32603,"message":"Internal error","data":str(e)}})
+
+
 
 if __name__ == "__main__":
     main()
