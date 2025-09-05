@@ -5,9 +5,11 @@ MCP Server para sugerencias de equipos VGC
 import sys
 import json
 import logging
+import pandas as pd
 
 from typing import Any, Dict, List, Optional
 from types import SimpleNamespace
+
 from server.tools.dataset import load_pokemon
 from server.tools.filters import apply_filters, bulk_score
 from server.tools.synergy import compute_synergy
@@ -23,6 +25,67 @@ try:
 except ImportError:
     print("Error: pydantic package not found. Install with: pip install pydantic", file=sys.stderr)
     sys.exit(1)
+
+logger.info("Cargando datos de Pokémon...")
+try:
+    POKEMON_DATA = load_pokemon("data/pokemon.csv")
+    POKEMON_DATA = [p for p in POKEMON_DATA if getattr(p, "generation", 0) <= 8]
+    POKEMON_DF = pd.read_csv("data/pokemon.csv")
+    if "Generation" in POKEMON_DF.columns:
+        POKEMON_DF = POKEMON_DF[POKEMON_DF["Generation"] <= 8]
+    logger.info(f"Datos cargados: {len(POKEMON_DATA)} Pokémon")
+except Exception as e:
+    logger.error(f"Error cargando datos: {e}")
+    POKEMON_DATA = []
+    POKEMON_DF = pd.DataFrame()
+
+def _write_json(payload: dict) -> None:
+    """Escribe la respuesta como JSON plano (para Claude.ai)"""
+    json_str = json.dumps(payload, ensure_ascii=False)
+    print(json_str, flush=True)
+    logger.debug(f"Sent response: {json_str}")
+
+def _read_json_or_lsp() -> Optional[dict]:
+    """
+    Lee un request desde stdin de manera robusta con mejor debugging
+    """
+    try:
+        sys.stdout.flush()
+        
+        line = sys.stdin.readline()
+        if not line:
+            logger.debug("EOF recibido en stdin")
+            return None
+        
+        line = line.strip()
+        logger.debug(f"Línea recibida: {line[:100]}...")
+        
+        if line.lower().startswith("content-length:"):
+            try:
+                length = int(line.split(":", 1)[1].strip())
+                logger.debug(f"Leyendo mensaje LSP de longitud: {length}")
+                sep_line = sys.stdin.readline()
+                json_content = sys.stdin.read(length)
+                logger.debug(f"Contenido LSP recibido: {json_content[:200]}...")
+                return json.loads(json_content)
+            except Exception as e:
+                logger.error(f"Error parsing LSP message: {e}")
+                return None
+        else:
+            try:
+                result = json.loads(line)
+                logger.debug(f"JSON parseado exitosamente: {result.get('method', 'unknown')}")
+                return result
+            except Exception as e:
+                logger.error(f"Error parsing JSON: {e}")
+                logger.error(f"Línea problemática: {line}")
+                return None
+    except EOFError:
+        logger.debug("EOFError en stdin")
+        return None
+    except Exception as e:
+        logger.error(f"Error reading input: {e}")
+        return None
 
 # Modelos de datos
 class SuggestParams(BaseModel):
@@ -49,10 +112,7 @@ class Team(BaseModel):
 
 # Funciones de herramientas
 def suggest_team(params: SuggestParams) -> Dict[str, Any]:
-    csv_path = "data/pokemon.csv"
-    pokes = load_pokemon(csv_path)
-    pokes = [p for p in pokes if getattr(p, "generation", 0) <= 8]
-
+    pokes = POKEMON_DATA.copy()
     c = params.constraints or {}
     lock_names = [n.lower() for n in c.get("lock", [])]
     include_types = set(t.lower() for t in c.get("include_types", []))
@@ -261,6 +321,11 @@ def handle_request(request: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             logger.info("Servidor inicializado correctamente")
             return None
         
+        # Manejar notificaciones de cancelación
+        elif method == "notifications/cancelled":
+            logger.info(f"Request cancelado: {params}")
+            return None
+        
         # Listar herramientas
         elif method == "tools/list":
             if request_id is None:
@@ -331,7 +396,7 @@ def handle_request(request: Dict[str, Any]) -> Optional[Dict[str, Any]]:
                                   }
                                 }
                               },
-                              "additionalProperties": false
+                              "additionalProperties": False
                             }
                         }
                     }
@@ -371,7 +436,7 @@ def handle_request(request: Dict[str, Any]) -> Optional[Dict[str, Any]]:
                     }
                 },
                 {
-                    "name": "pool.filter",
+                    "name": "pool_filter",
                     "description": "Lista candidatos del pool según filtros sobre el CSV (tipos, velocidad, abilities, etc.)",
                     "inputSchema": {
                         "type": "object",
@@ -387,7 +452,7 @@ def handle_request(request: Dict[str, Any]) -> Optional[Dict[str, Any]]:
                                     "min_spa": {"type": "integer"},
                                     "require_abilities": {"type": "array", "items": {"type": "string"}}
                                 },
-                                "additionalProperties": false
+                                "additionalProperties": False
                             },
                             "limit": {"type": "integer", "default": 30}
                         },
@@ -395,7 +460,7 @@ def handle_request(request: Dict[str, Any]) -> Optional[Dict[str, Any]]:
                     }
                 },
                 {
-                    "name": "team.synergy",
+                    "name": "team_synergy",
                     "description": "Analiza cobertura y resistencias de un equipo (usando el CSV)",
                     "inputSchema": {
                         "type": "object",
@@ -535,15 +600,11 @@ def handle_request(request: Dict[str, Any]) -> Optional[Dict[str, Any]]:
                         }
                     }
             
-            elif tool_name == "pool.filter":
-                # Filtros rápidos sobre el CSV con pandas (sin tocar tu motor)
-                import pandas as pd
+            elif tool_name == "pool_filter":
                 constraints = arguments.get("constraints", {}) or {}
                 limit = int(arguments.get("limit", 30))
 
-                df = pd.read_csv("data/pokemon.csv")
-                if "Generation" in df.columns:
-                    df = df[df["Generation"] <= 8]
+                df = POKEMON_DF.copy()
 
                 # Normaliza
                 def norm(x): return str(x).lower() if pd.notna(x) else ""
@@ -588,15 +649,11 @@ def handle_request(request: Dict[str, Any]) -> Optional[Dict[str, Any]]:
                     "result":{"content":[{"type":"text","text":json.dumps(result_rows, ensure_ascii=False, indent=2)}]}
                 }
 
-            elif tool_name == "team.synergy":
+            elif tool_name == "team_synergy":
                 # Usa tu motor real para calcular sinergia
                 try:
-                    from server.tools.dataset import load_pokemon
-                    from server.tools.synergy import compute_synergy
-
                     names = [x["name"] for x in arguments["team"]["pokemon"]]
-                    pool = load_pokemon("data/pokemon.csv")
-                    pool = [p for p in pool if getattr(p, "generation", 0) <= 8]
+                    pool = POKEMON_DATA.copy()
                     by_name = {p.name.lower(): p for p in pool}
                     selected = [by_name[n.lower()] for n in names if n and n.lower() in by_name]
                     syn = compute_synergy(selected)
@@ -614,14 +671,11 @@ def handle_request(request: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
             elif tool_name == "suggest_member":
                 # Sugerencias rápidas (3–5) para construir por pasos
-                import pandas as pd
                 min_speed = int(arguments.get("min_speed", 0))
                 required_ability = arguments.get("required_ability")
                 role = arguments.get("role")
 
-                df = pd.read_csv("data/pokemon.csv")
-                if "Generation" in df.columns:
-                    df = df[df["Generation"] <= 8]
+                df = POKEMON_DF.copy()
 
                 df["Abilities"] = df["Abilities"].astype(str)
 
@@ -715,41 +769,53 @@ def handle_request(request: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 def main():
     """Función principal del servidor"""
     logger.info("Iniciando servidor MCP VGC Team Builder...")
+
+    logger.debug(f"stdin encoding: {sys.stdin.encoding}")
+    logger.debug(f"stdout encoding: {sys.stdout.encoding}")
     
     try:
-        for line in sys.stdin:
-            line = line.strip()
-            if not line:
-                continue
-            
-            logger.debug(f"Línea recibida: {line}")
-            
+        request_count = 0
+        while True:
             try:
-                request = json.loads(line)
-                logger.debug(f"Request parseado: {request}")
+                request = _read_json_or_lsp()
+                if request is None:
+                    logger.info("No más requests, cerrando servidor")
+                    break
                 
+                request_count += 1
+                logger.debug(f"Request #{request_count} recibido")
+                
+                if not isinstance(request, dict):
+                    logger.error(f"Request mal formado (no es dict): {request!r}")
+                    continue
+                
+                logger.debug(f"Request recibido: {request}")
+
                 response = handle_request(request)
-                
-                # Solo enviar respuesta si no es None
-                if isinstance(response, dict) and response.get("id") is not None:
-                    response_json = json.dumps(response, ensure_ascii=False)
-                    logger.debug(f"Enviando respuesta: {response_json}")
-                    print(response_json)
+
+                if response is not None:
+                    logger.debug(f"Enviando respuesta para ID: {response.get('id')}")
+                    _write_json(response)
                     sys.stdout.flush()
                 else:
-                    logger.debug("Sin respuesta necesaria (notification o sin id)")
-                
-            except json.JSONDecodeError as e:
-                logger.error(f"Error decodificando JSON: {e} - Línea: {line}")
-                
+                    logger.debug("Sin respuesta necesaria (notification)")
+
+            except EOFError:
+                logger.info("EOF recibido, cerrando servidor")
+                break
+            except KeyboardInterrupt:
+                logger.info("Interrupción del usuario")
+                break
             except Exception as e:
-                logger.exception(f"Error inesperado procesando línea: {e}")
-    
+                logger.exception(f"Error procesando request #{request_count}: {e}")
+
     except KeyboardInterrupt:
         logger.info("Servidor detenido por el usuario")
     except Exception as e:
         logger.exception(f"Error fatal: {e}")
         sys.exit(1)
+    finally:
+        logger.info("Servidor MCP finalizado")
 
 if __name__ == "__main__":
     main()
