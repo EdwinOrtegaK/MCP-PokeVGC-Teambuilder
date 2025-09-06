@@ -1,84 +1,86 @@
 # MCP-PokeVGC-Teambuilder
 
-Servidor **MCP** para construir y analizar equipos de Pokémon VGC (Video Game Championships).  
-Este proyecto fue diseñado como un **MVP (Minimum Viable Product)** que permite:
+**MCP** server for building and analyzing Pokémon VGC (Video Game Championships) teams.  
+This project was designed as an **MVP (Minimum Viable Product)** that allows:
 
-- Sugerir equipos completos basados en restricciones (tipos, velocidad, habilidades, roles, etc.).
-- Sugerir miembros individuales para completar un equipo.
-- Exportar equipos al formato de Pokémon Showdown.
-- Analizar sinergias ofensivas y defensivas de un equipo.
-- Filtrar rápidamente el pool de Pokémon desde el dataset.
+- Suggesting complete teams based on constraints (types, speed, abilities, roles, etc.).
+- Suggesting individual members to complete a team.
+- Exporting teams to the Pokémon Showdown format.
+- Analyzing offensive and defensive synergies of a team.
+- Quickly filtering the Pokémon pool from the dataset.
 
-## 🚀 Instalación
+## 🚀 Installation
 
-1. Clona el repositorio:
+1. Clone the repository:
 
 ```bash
 git clone <repository-url>
 cd MCP-PokeVGC-Teambuilder
 ```
 
-2. Crea y activa un entorno virtual:
+2. Create and activate a virtual environment:
 
 ```bash
 python -m venv .venv
-# En Linux/macOS
+
+# On Linux/macOS
 source .venv/bin/activate
-# En Windows (PowerShell)
+
+# On Windows (PowerShell)
 .venv\Scripts\activate
 ```
 
-3. Instala dependencias:
+3. Install dependencies:
 
 ```bash
 pip install -r requirements.txt
 ```
 
-## ▶️ Ejecución del servidor MCP
+## ▶️ Running the MCP server
 
-Ejecuta el servidor directamente con Python:
+Run the server directly with Python:
 
 ```bash
 python -m server.main
 ```
 
-También puedes configurarlo como un **MCP Server** en clientes compatibles (ej. Claude Desktop), apuntando al binario de Python en tu `.venv` y con argumentos:
+You can also configure it as an **MCP Server** in compatible clients (e.g. Claude Desktop), pointing to the Python binary in your `.venv` and with arguments:
 
 ```
 -u -m server.main
 ```
 
-Cuando está corriendo, el servidor escucha solicitudes MCP vía **stdin/stdout**.
+When running, the server listens for MCP requests via **stdin/stdout**.
 
-## 📂 Estructura del proyecto
+## 📂 Project structure
 
 ```
 MCP-PokeVGC-Teambuilder/
 ├── data/
-│   └── pokemon.csv          # Dataset principal (Gen 1–8)
+│   └── pokemon.csv          # Main dataset (Gen 1–8)
 ├── server/
 │   ├── core/
-│   │   └── models.py        # Definición de objetos Pokémon y SynergyReport
+│   │   └── models.py        # Definition of Pokémon objects and SynergyReport
 │   ├── tools/
-│   │   ├── dataset.py       # Carga y normalización del dataset
-│   │   ├── filters.py       # Filtros rápidos (velocidad, tipos, etc.)
-│   │   ├── roles.py         # Inferencia de roles por stats/abilities
-│   │   ├── synergy.py       # Cobertura ofensiva y resistencias
-│   │   └── export.py        # Exportar equipos a Showdown
-│   ├── schemas/             # Esquemas JSON para herramientas MCP
-│   └── main.py              # Servidor MCP principal
-├── tests/                   # Pruebas unitarias con pytest
+│   │   ├── dataset.py       # Dataset loading and normalization
+│   │   ├── filters.py       # Quick filters (speed, types, etc.)
+│   │   ├── roles.py         # Role inference by stats/abilities
+│   │   ├── synergy.py       # Offensive coverage and resistances
+│   │   └── export.py        # Export teams to Showdown
+│   ├── schemas/             # JSON Schemas for MCP tools
+│   └── main.py              # Main MCP server
+├── tests/                   # Unit tests with pytest
 └── README.md
 ```
 
-## 🛠 Herramientas MCP disponibles
+## 🛠 Available MCP tools
 
-El servidor expone varias herramientas que pueden ser invocadas vía `tools/call`:
+The server exposes several tools that can be invoked via `tools/call`:
 
 ### 1. `suggest_team`
-Sugiere un equipo completo (6 Pokémon).
+Suggests a complete team (6 Pokémon).
 
-**Ejemplo de argumentos:**
+**Example arguments:**
 
 ```json
 {
@@ -93,7 +95,7 @@ Sugiere un equipo completo (6 Pokémon).
 ```
 
 ### 2. `export_showdown`
-Convierte un equipo al formato de Pokémon Showdown.
+Converts a team to Pokémon Showdown format.
 
 ```json
 {
@@ -107,9 +109,9 @@ Convierte un equipo al formato de Pokémon Showdown.
 ```
 
 ### 3. `pool.filter`
-Devuelve un listado de candidatos según filtros simples.
+Returns a list of candidates according to simple filters.
 
-**Ejemplo:**
+**Example:**
 
 ```json
 {
@@ -123,9 +125,9 @@ Devuelve un listado de candidatos según filtros simples.
 ```
 
 ### 4. `team.synergy`
-Analiza la sinergia de un equipo (cobertura ofensiva y resistencias).
+Analyzes the synergy of a team (offensive coverage and resistances).
 
-**Ejemplo:**
+**Example:**
 
 ```json
 {
@@ -140,9 +142,9 @@ Analiza la sinergia de un equipo (cobertura ofensiva y resistencias).
 ```
 
 ### 5. `suggest_member`
-Sugiere 3–5 candidatos que cumplan criterios.
+Suggests 3–5 candidates that meet criteria.
 
-**Ejemplo:**
+**Example:**
 
 ```json
 {
@@ -152,37 +154,37 @@ Sugiere 3–5 candidatos que cumplan criterios.
 }
 ```
 
-## ✅ Pruebas
+## ✅ Tests
 
-El proyecto incluye **tests automáticos** con `pytest`:
+The project includes **automated tests** with `pytest`:
 
 ```bash
 python -m pytest -q
 ```
 
-Pruebas incluidas:
+Included tests:
 
-- `test_dataset.py`: valida carga correcta de `pokemon.csv`.
-- `test_synergy.py`: revisa cobertura y resistencias con equipos toy.
-- `test_suggest.py`: asegura que `suggest_team` devuelve siempre 6 miembros.
+- `test_dataset.py`: validates correct loading of `pokemon.csv`.
+- `test_synergy.py`: checks coverage and resistances with toy teams.
+- `test_suggest.py`: ensures `suggest_team` always returns 6 members.
 
 ## 📊 Dataset
 
-El dataset usado es `data/pokemon.csv`, derivado de Smogon y Kaggle.  
-Incluye columnas:
+The dataset used is `data/pokemon.csv`, derived from Smogon and Kaggle.  
+It includes columns:
 
 - **Name, Type 1, Type 2**
 - **HP, Att, Def, Spa, Spd, Spe**
 - **Abilities**
-- **Against_X** para los 18 tipos
+- **Against_X** for all 18 types
 - **Generation**
 
-Actualmente soporta **Generación 1–8**.  
-Los formatos disponibles en este MVP son: `vgc2020`, `vgc2021`, `vgc2022`.
+Currently supports **Generations 1–8**.  
+The formats available in this MVP are: `vgc2020`, `vgc2021`, `vgc2022`.
 
-## 🧪 Ejemplos de uso
+## 🧪 Usage examples
 
-### Equipo Trick Room
+### Trick Room team
 
 ```json
 {
@@ -194,7 +196,7 @@ Los formatos disponibles en este MVP son: `vgc2020`, `vgc2021`, `vgc2022`.
 }
 ```
 
-### Equipo rápido con Dragapult lockeado
+### Fast team with locked Dragapult
 
 ```json
 {
@@ -207,17 +209,16 @@ Los formatos disponibles en este MVP son: `vgc2020`, `vgc2021`, `vgc2022`.
 }
 ```
 
-## ⚠️ Problemas comunes
+## ⚠️ Common issues
 
-1. **`pytest` no se reconoce**  
-   Ejecutar con:  
+1. **`pytest` not recognized**  
+   Run with:  
    ```bash
    python -m pytest -q
    ```
 
-2. **Claude rechaza formatos VGC futuros (2023+)**  
-   El dataset llega solo hasta **Gen 8**, por lo que únicamente se soportan: `vgc2020`, `vgc2021`, `vgc2022`.
+2. **Claude rejects future VGC formats (2023+)**  
+   The dataset only goes up to **Gen 8**, so only these are supported: `vgc2020`, `vgc2021`, `vgc2022`.
 
-3. **Abilities como lista en el CSV**  
-   Se normalizan en runtime para que `infer_roles` funcione correctamente.
-
+3. **Abilities as a list in the CSV**  
+   They are normalized at runtime so that `infer_roles` works correctly.
