@@ -3,6 +3,7 @@ import os
 import random
 from pathlib import Path
 from typing import Dict, List, Set
+from types import SimpleNamespace
 
 from ..core.models import SuggestParams, Team, TeamMember, Pokemon
 from .dataset import load_pokemon
@@ -40,6 +41,7 @@ def _restricted_set_for(fmt: str) -> Set[str]:
 # --- extra guardrails for Gen 8 legality (automatic forms ban) ---
 MEGA_PREFIXES = ("Mega ", "Mega-")  # cover "Mega Charizard X" or "Mega-Charizard-X"
 OTHER_IMPOSSIBLE_FORMS_GEN8 = ("Primal ", "Primal-", "Ultra ", "Ultra-")
+GEN8_FORMS_AUTO_BAN = {"Zygarde Complete", "Zygarde-Complete"} 
 
 def _is_impossible_form_in_gen8(name: str) -> bool:
     """Return True if this is a form that doesn't exist in Gen 8 (e.g., Mega/Primal/Ultra)."""
@@ -48,14 +50,37 @@ def _is_impossible_form_in_gen8(name: str) -> bool:
         return True
     if n.startswith(OTHER_IMPOSSIBLE_FORMS_GEN8):
         return True
+    if n in GEN8_FORMS_AUTO_BAN: 
+        return True
     return False
 
-def suggest_team(params: SuggestParams) -> Dict:
+def legal_suggest_team(params: SuggestParams) -> Dict:
     fmt = params.format or "vgc2022"
 
     # 1) Load full dataset and apply base constraints/filters
     all_pokes: List[Pokemon] = load_pokemon(DATASET_PATH)
     pool = apply_filters(all_pokes, params.constraints)
+
+    # --- normalize constraints -> object with attributes (apply_filters expects attrs, not a dict) ---
+    raw_c = getattr(params, "constraints", None)
+    # soporta dict o Pydantic; si fuera BaseModel, usa model_dump()
+    if hasattr(raw_c, "model_dump"):
+        raw_c = raw_c.model_dump()
+    raw_c = raw_c or {}
+
+    # si te interesa respetar trick room aquí (min_speed=0 en TR):
+    strategy = (raw_c.get("strategy") or {})
+    tr_mode = bool(strategy.get("trick_room"))
+
+    C = SimpleNamespace(
+        include_types=[t.lower() for t in raw_c.get("include_types", [])],
+        exclude_types=[t.lower() for t in raw_c.get("exclude_types", [])],
+        min_speed=0 if tr_mode else int(raw_c.get("min_speed", 0) or 0),
+        min_spdef=int(raw_c.get("min_spdef", 0) or 0),
+        min_bulk=int(raw_c.get("min_bulk", 0) or 0),
+        roles_needed=[]
+    )
+    pool = apply_filters(all_pokes, C)
 
     # 2) Compose denylist: file-based + automatic Gen8-impossible forms
     base_deny: Set[str] = _deny_set_for(fmt)

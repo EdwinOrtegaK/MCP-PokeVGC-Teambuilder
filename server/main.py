@@ -7,14 +7,13 @@ import json
 import logging
 import pandas as pd
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 from types import SimpleNamespace
-
+from pathlib import Path
 from server.tools.dataset import load_pokemon
 from server.tools.filters import apply_filters, bulk_score
 from server.tools.synergy import compute_synergy
 from server.tools.roles import infer_roles
-
 
 # Configurar logging para debug
 logging.basicConfig(level=logging.DEBUG, stream=sys.stderr, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -87,6 +86,139 @@ def _read_json_or_lsp() -> Optional[dict]:
         logger.error(f"Error reading input: {e}")
         return None
 
+def _clean_name(s: str) -> str:
+    return " ".join(str(s or "").split())
+
+def _is_impossible_gen8(name: str) -> bool:
+    n = _clean_name(name)
+    return (
+        n.startswith(("Mega ", "Mega-", " Mega")) or
+        n.startswith(("Primal ", "Primal-")) or
+        n.startswith(("Ultra ", "Ultra-"))
+    )
+
+def _deny_set_for(fmt: str) -> set:
+    """Lee data/ilegal/{fmt}.txt y devuelve el set de nombres ilegales."""
+    path = Path("data/ilegal") / f"{fmt}.txt"
+    if not path.exists():
+        return set()
+    with path.open("r", encoding="utf-8") as f:
+        return {line.strip() for line in f if line.strip()}
+
+def _apply_legality_df(df: pd.DataFrame, fmt: str = "vgc2022") -> pd.DataFrame:
+    deny = _deny_set_for(fmt)
+
+    if "Generation" in df.columns:
+        df = df[df["Generation"].fillna(0).astype(int) <= 8]
+
+    df = df[~df["Name"].apply(_is_impossible_gen8)]
+    df = df[~df["Name"].isin(["Zygarde Complete", "Zygarde-Complete"])]
+
+    if deny:
+        df = df[~df["Name"].isin(deny)]
+
+    # normaliza columnas usadas luego
+    for col in ("Type 1", "Type 2", "Abilities"):
+        if col in df.columns:
+            df[col] = df[col].astype(str)
+
+    return df
+
+def _apply_legality_list(pokes: List[Any], fmt: str = "vgc2022") -> List[Any]:
+    """Filtra una lista de objetos Pokémon (con atributo .name) según legalidad Gen8/VGC."""
+    deny = _deny_set_for(fmt)
+    out = []
+    for p in pokes:
+        n = getattr(p, "name", "")
+        # Autoban de formas inexistentes en Gen8 y Zygarde-Complete
+        if _is_impossible_gen8(n):
+            continue
+        if n in {"Zygarde Complete", "Zygarde-Complete"}:
+            continue
+        # Denylist por formato (data/ilegal/{fmt}.txt)
+        if deny and n in deny:
+            continue
+        out.append(p)
+    return out
+
+def _species_key(name: str) -> str:
+    """
+    Devuelve una clave de especie canónica para evitar duplicados por familia/forma.
+    Reglas específicas + heurística simple.
+    """
+    n = (_clean_name(name) or "").lower()
+
+    # Casos con formas
+    if "necrozma" in n:
+        return "necrozma"
+    if "calyrex" in n:
+        return "calyrex"
+    if "giratina" in n:
+        return "giratina"
+    if "zygarde" in n:
+        return "zygarde"
+    if "rotom" in n:
+        return "rotom"
+    if "urshifu" in n:
+        return "urshifu"
+    if "indeedee" in n:
+        return "indeedee"
+    if "landorus" in n:
+        return "landorus"
+    if "thundurus" in n:
+        return "thundurus"
+    if "tornadus" in n:
+        return "tornadus"
+    if "enamorus" in n:
+        return "enamorus"
+    if "shaymin" in n:
+        return "shaymin"
+    if "kyurem" in n:
+        return "kyurem"
+    if "wishiwashi" in n:
+        return "wishiwashi"
+
+    # Heurística genérica:
+    parts = n.split()
+    if len(parts) >= 2:
+        # Si la última palabra parece ser una especie "nuclear" conocida, úsala
+        tail = parts[-1]
+        # Lista corta de núcleos frecuentes para no pasarnos de listados
+        core_last_words = {
+            "necrozma","giratina","calyrex","urshifu","rotom",
+            "landorus","thundurus","tornadus","enamorus","shaymin","kyurem"
+        }
+        if tail in core_last_words:
+            return tail
+        # Si la primera palabra parece el núcleo, úsala
+        return parts[0]
+
+    # Fallback: el nombre tal cual
+    return n
+
+def _base_species(name: str) -> str:
+    # Alias para mantener el mismo nombre usado en el resto del código
+    return _species_key(name)
+
+def _as_list(x):
+    """Normaliza a lista (Claude a veces manda string en vez de array)."""
+    if x is None:
+        return []
+    return x if isinstance(x, list) else [x]
+
+def _restricted_set_for(fmt: str) -> set:
+    path = Path("data/restricted") / f"{fmt}.txt"
+    if not path.exists():
+        return set()
+    out = set()
+    with path.open("r", encoding="utf-8") as f:
+        for line in f:
+            name = line.strip()
+            if not name:
+                continue
+            out.add(_base_species(name))
+    return out
+
 # Modelos de datos
 class SuggestParams(BaseModel):
     format: Optional[str] = "vgc2022"
@@ -112,20 +244,23 @@ class Team(BaseModel):
 
 # Funciones de herramientas
 def suggest_team(params: SuggestParams) -> Dict[str, Any]:
-    pokes = POKEMON_DATA.copy()
+    fmt = (params.format or "vgc2022").strip().lower()
+    pokes = _apply_legality_list(POKEMON_DATA.copy(), fmt)
     c = params.constraints or {}
-    lock_names = [n.lower() for n in c.get("lock", [])]
-    include_types = set(t.lower() for t in c.get("include_types", []))
-    exclude_types = set(t.lower() for t in c.get("exclude_types", []))
-    require_abilities = [a.lower() for a in c.get("require_abilities", [])]
+    strategy = c.get("strategy", {}) or {}
+    restricted_bases = _restricted_set_for(fmt)
+    restricted_cap = int((c.get("strategy") or {}).get("restricted_cap", 2))
+    lock_names = [n.lower() for n in _as_list(c.get("lock")) if str(n).strip()]
+    include_types = set(t.lower() for t in _as_list(c.get("include_types")) if str(t).strip())
+    exclude_types = set(t.lower() for t in _as_list(c.get("exclude_types")) if str(t).strip())
+    require_abilities = [a.lower() for a in _as_list(c.get("require_abilities")) if str(a).strip()]
     min_speed = int(c.get("min_speed", 0))
     max_speed = c.get("max_speed")
     min_att = c.get("min_att")
     min_spa = c.get("min_spa")
     min_spdef = int(c.get("min_spdef", 0)) if c.get("min_spdef") is not None else 0
     min_bulk = int(c.get("min_bulk", 0)) if c.get("min_bulk") is not None else 0
-    need_roles = set(r.lower() for r in c.get("need_roles", []))
-    strategy = c.get("strategy", {}) or {}
+    need_roles = set(r.lower() for r in _as_list(c.get("need_roles")) if str(r).strip())
     tr_mode = bool(strategy.get("trick_room"))
     weather = strategy.get("weather")
     want_speed_control = bool(strategy.get("speed_control"))
@@ -203,19 +338,40 @@ def suggest_team(params: SuggestParams) -> Dict[str, Any]:
 
     # evita duplicados funcionales y arma el equipo
     banned_names = set()
-    pick = list(locked)
+    used_bases = set()
 
-    # elimina bloqueados del pool
-    locked_names = {x.name for x in locked}
+    # Arranca con los lockeados (si hay), dedupe por base y cuenta restringidos
+    pick = []
+    restricted_count = 0
+    for lp in locked:
+        base = _base_species(lp.name)
+        if base in used_bases:
+            continue  # no duplicar especie/familia (p. ej. dos Necrozma)
+        if base in restricted_bases and restricted_count >= restricted_cap:
+            continue  # excedería el cupo (Serie 12 = 2)
+        pick.append(lp)
+        used_bases.add(base)
+        banned_names.add(lp.name)
+        if base in restricted_bases:
+            restricted_count += 1
+
+    locked_names = {x.name for x in pick}
     cand = [p for p in pool if p.name not in locked_names]
-
     cand_sorted = sorted(cand, key=score, reverse=True)
 
     for p in cand_sorted:
-        if len(pick) >= 6: break
-        if p.name in banned_names: continue
+        if len(pick) >= 6:
+            break
+        base = _base_species(p.name)
+        if base in used_bases:
+            continue  # no duplicar especie/familia
+        if base in restricted_bases and restricted_count >= restricted_cap:
+            continue  # respeta CAP de restringidos
         pick.append(p)
+        used_bases.add(base)
         banned_names.add(p.name)
+        if base in restricted_bases:
+            restricted_count += 1
 
     team_members = [{"name": p.name} for p in pick[:6]]
     syn = compute_synergy(pick[:6])
@@ -444,6 +600,7 @@ def handle_request(request: Dict[str, Any]) -> Optional[Dict[str, Any]]:
                             "constraints": {
                                 "type": "object",
                                 "properties": {
+                                    "format": {"type":"string","enum":["vgc2020","vgc2021","vgc2022"],"default":"vgc2022"},
                                     "include_types": {"type": "array", "items": {"type": "string"}},
                                     "exclude_types": {"type": "array", "items": {"type": "string"}},
                                     "min_speed": {"type": "integer", "default": 0},
@@ -606,19 +763,22 @@ def handle_request(request: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
                 df = POKEMON_DF.copy()
 
+                # Formato del filtro (por defecto vgc2022)
+                fmt = (constraints.get("format") or "vgc2022").strip().lower()
+                df = _apply_legality_df(POKEMON_DF.copy(), fmt)
+
                 # Normaliza
-                def norm(x): return str(x).lower() if pd.notna(x) else ""
                 df["Type 1"] = df["Type 1"].astype(str)
                 df["Type 2"] = df["Type 2"].astype(str)
                 df["Abilities"] = df["Abilities"].astype(str)
 
-                inc = [t.lower() for t in constraints.get("include_types", [])]
-                exc = [t.lower() for t in constraints.get("exclude_types", [])]
+                inc = [t.lower() for t in _as_list(constraints.get("include_types")) if str(t).strip()]
+                exc = [t.lower() for t in _as_list(constraints.get("exclude_types")) if str(t).strip()]
                 min_speed = int(constraints.get("min_speed", 0))
                 max_speed = constraints.get("max_speed")
                 min_att = constraints.get("min_att")
                 min_spa = constraints.get("min_spa")
-                req_abis = [a.lower() for a in constraints.get("require_abilities", [])]
+                req_abis = [a.lower() for a in _as_list(constraints.get("require_abilities")) if str(a).strip()]
 
                 mask = (df["Spe"] >= min_speed)
                 if max_speed is not None:
@@ -676,6 +836,9 @@ def handle_request(request: Dict[str, Any]) -> Optional[Dict[str, Any]]:
                 role = arguments.get("role")
 
                 df = POKEMON_DF.copy()
+
+                fmt = "vgc2022"
+                df = _apply_legality_df(POKEMON_DF.copy(), fmt)
 
                 df["Abilities"] = df["Abilities"].astype(str)
 
